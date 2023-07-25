@@ -38,15 +38,7 @@ S3ApiInstance::S3ApiInstance(Aws::Utils::Logging::LogLevel log_level) :
         if (!Aws::Environment::GetEnv(name).empty())
             return;
     }
-    if (ec2_metadata_endpoint_reachable())
-        return;
-    ARCTICDB_RUNTIME_DEBUG(log::Loggers::instance()->storage(),
-        "Does not appear to be using AWS. Will set AWS_EC2_METADATA_DISABLED");
-#ifdef WIN32
-    _putenv_s("AWS_EC2_METADATA_DISABLED", "true");
-#else
-    setenv("AWS_EC2_METADATA_DISABLED", "true", true);
-#endif
+    return;
 }
 
 S3ApiInstance::~S3ApiInstance() {
