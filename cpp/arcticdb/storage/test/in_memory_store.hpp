@@ -33,7 +33,7 @@ namespace arcticdb {
             util::raise_rte("Not implemented");
         }
 
-        bool supports_prefix_matching() override {
+        bool supports_prefix_matching() const override {
             return false;
         }
 
@@ -41,7 +41,7 @@ namespace arcticdb {
             return false;
         }
 
-        std::vector<Composite<ProcessingSegment>> batch_read_uncompressed(
+        std::vector<Composite<ProcessingUnit>> batch_read_uncompressed(
                 std::vector<Composite<pipelines::SliceAndKey>> &&,
                 const std::vector<std::shared_ptr<Clause>>&,
                 const std::shared_ptr<std::unordered_set<std::string>>&,
@@ -202,7 +202,7 @@ namespace arcticdb {
             util::raise_rte("Not implemented");
         }
 
-        RemoveKeyResultType remove_key_sync(const entity::VariantKey &key, RemoveOpts opts) override {
+        RemoveKeyResultType remove_key_sync(const entity::VariantKey &key, storage::RemoveOpts opts) override {
             StorageFailureSimulator::instance()->go(FailureType::DELETE);
             std::lock_guard lock{mutex_};
             size_t removed = util::variant_match(key,
@@ -224,7 +224,7 @@ namespace arcticdb {
         }
 
 
-        void iterate_type(KeyType kt, std::function<void(entity::VariantKey &&)> func, const std::string& prefix = "")
+        void iterate_type(KeyType kt, entity::IterateTypeVisitor func, const std::string& prefix = "")
         override {
             auto prefix_matcher = stream_id_prefix_matcher(prefix);
             auto failure_sim = StorageFailureSimulator::instance();

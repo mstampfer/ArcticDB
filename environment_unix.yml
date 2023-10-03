@@ -3,6 +3,8 @@ channels:
   - conda-forge
 dependencies:
   # Build tools
+  - cxx-compiler
+  - c-compiler
   - cmake
   - gtest
   - gflags
@@ -28,9 +30,12 @@ dependencies:
   - libprotobuf < 4
   - bitmagic
   - spdlog
-  # Incompatibility with fmt last version
+  - azure-core-cpp
+  - azure-identity-cpp
+  - azure-storage-blobs-cpp
+  # ArcticDB is currently incompatible with fmt 10
   - fmt < 10
-  - folly >2022.10.31 # latest version published on vcpkg
+  - folly
   # Vendored build dependencies (see `cpp/thirdparty`)
   # Versions must be kept in sync
   - xxhash
@@ -39,17 +44,18 @@ dependencies:
   - rapidcheck
   - msgpack-c
   - recycle
-  # Matches the version of lmdb and lmdbxx as vendored
-  # via submodules.
+  # Matches the version of lmdb as vendored in its submodule.
   - lmdb==0.9.22
-  - lmdbxx==0.9.14
-  - libarrow
+  - lmdbxx
   - libiconv
   - aws-c-s3
+  # Build dependencies for tests
+  - libarrow
   # Python dependences
   - python =3.10 # Python 3.11 requires protobuf>=4
+  - packaging
   - numpy
-  - pandas < 2
+  - pandas
   - pytest
   - boto3
   - werkzeug
@@ -60,4 +66,8 @@ dependencies:
   # See: https://github.com/man-group/ArcticDB/pull/291
   - hypothesis < 6.73
   - pytest-sugar
-
+  - pymongo
+  # Python dependencies (for tests only)
+  - azure-storage-blob
+  - azure-identity
+  - pyarrow

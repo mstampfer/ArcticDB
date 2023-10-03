@@ -6,25 +6,17 @@ Use of this software is governed by the Business Source License 1.1 included in 
 As of the Change Date specified in that file, in accordance with the Business Source License, use of this software will be governed by the Apache License, version 2.0.
 """
 import sys
-import os
 
 import pytz
-from arcticdb_ext.exceptions import InternalException, ErrorCode, ErrorCategory
-from arcticdb.exceptions import ArcticNativeNotYetImplemented, LibraryNotFound
-from pandas import Timestamp
+from arcticdb_ext.exceptions import InternalException
+from arcticdb.exceptions import ArcticDbNotYetImplemented, LibraryNotFound
 
-try:
-    from arcticdb.version_store import VersionedItem as PythonVersionedItem
-except ImportError:
-    # arcticdb squashes the packages
-    from arcticdb._store import VersionedItem as PythonVersionedItem
-from arcticdb_ext.storage import NoDataFoundException, KeyType
-from arcticdb_ext.version_store import VersionRequestType
+from arcticdb_ext.storage import NoDataFoundException
 
 from arcticdb.arctic import Arctic
-from arcticdb.adapters.s3_library_adapter import S3LibraryAdapter
-from arcticdb.options import LibraryOptions
+from arcticdb.exceptions import MismatchingLibraryOptions
 from arcticdb.encoding_version import EncodingVersion
+from arcticdb.options import LibraryOptions
 from arcticdb import QueryBuilder, DataError
 from arcticc.pb2.s3_storage_pb2 import Config as S3Config
 
@@ -32,43 +24,23 @@ import math
 import re
 import pytest
 import pandas as pd
-from datetime import datetime, date, timezone, timedelta
+from datetime import datetime, timezone
 import numpy as np
-from arcticdb_ext.tools import AZURE_SUPPORT
-from numpy import datetime64
-from arcticdb.util.test import (
-    assert_frame_equal,
-    random_strings_of_length,
-    random_floats,
-)
-import random
 
+from arcticdb.config import MACOS_CONDA_BUILD, MACOS_CONDA_BUILD_SKIP_REASON
+from arcticdb.util.test import assert_frame_equal, RUN_MONGO_TEST
 
-if AZURE_SUPPORT:
-    from azure.storage.blob import BlobServiceClient
 from botocore.client import BaseClient as BotoClient
 import time
 
 
-try:
-    from arcticdb.version_store.library import (
-        WritePayload,
-        ArcticUnsupportedDataTypeException,
-        ReadRequest,
-        ReadInfoRequest,
-        ArcticInvalidApiUsageException,
-        StagedDataFinalizeMethod,
-    )
-except ImportError:
-    # arcticdb squashes the packages
-    from arcticdb.library import (
-        WritePayload,
-        ArcticUnsupportedDataTypeException,
-        ReadRequest,
-        ReadInfoRequest,
-        ArcticInvalidApiUsageException,
-        StagedDataFinalizeMethod,
-    )
+from arcticdb.version_store.library import (
+    WritePayload,
+    ArcticUnsupportedDataTypeException,
+    ReadRequest,
+    StagedDataFinalizeMethod,
+    ArcticInvalidApiUsageException,
+)
 
 
 def test_library_creation_deletion(arctic_client):
@@ -79,6 +51,7 @@ def test_library_creation_deletion(arctic_client):
         ac.create_library("pytest_test_lib")
 
     assert ac.list_libraries() == ["pytest_test_lib"]
+    assert ac.has_library("pytest_test_lib")
     assert ac["pytest_test_lib"].name == "pytest_test_lib"
 
     ac.delete_library("pytest_test_lib")
@@ -88,87 +61,126 @@ def test_library_creation_deletion(arctic_client):
     assert not ac.list_libraries()
     with pytest.raises(LibraryNotFound):
         _lib = ac["pytest_test_lib"]
+    assert not ac.has_library("pytest_test_lib")
 
 
-def test_uri_override(moto_s3_uri_incl_bucket):
-    def _get_s3_storage_config(lib):
-        primary_storage_name = lib._nvs.lib_cfg().lib_desc.storage_ids[0]
-        primary_any = lib._nvs.lib_cfg().storage_by_id[primary_storage_name]
+def test_get_library(arctic_client):
+    ac = arctic_client
+    assert ac.list_libraries() == []
+    # Throws if library doesn't exist
+    with pytest.raises(LibraryNotFound):
+        _ = ac.get_library("pytest_test_lib")
+    # Creates library with default options if just create_if_missing set to True
+    lib = ac.get_library("pytest_test_lib_default_options", create_if_missing=True)
+
+    assert lib.options() == LibraryOptions(encoding_version=ac._encoding_version)
+    # Creates library with the specified options if create_if_missing set to True and options provided
+    library_options = LibraryOptions(
+        dynamic_schema=True,
+        dedup=True,
+        rows_per_segment=10,
+        columns_per_segment=10,
+        encoding_version=EncodingVersion.V1 if ac._encoding_version == EncodingVersion.V2 else EncodingVersion.V2,
+    )
+    lib = ac.get_library("pytest_test_lib_specified_options", create_if_missing=True, library_options=library_options)
+    assert lib.options() == library_options
+    # If the library already exists, create_if_missing is True, and options are provided, then the provided options must match the existing library
+    library_options.dynamic_schema = False
+    with pytest.raises(MismatchingLibraryOptions):
+        _ = ac.get_library("pytest_test_lib_specified_options", create_if_missing=True, library_options=library_options)
+    # Throws if library_options are provided but create_if_missing is False
+    with pytest.raises(ArcticInvalidApiUsageException):
+        _ = ac.get_library("pytest_test_lib", create_if_missing=False, library_options=library_options)
+
+
+def test_do_not_persist_s3_details(moto_s3_endpoint_and_credentials):
+    """We apply an in-memory overlay for these instead. In particular we should absolutely not persist credentials
+    in the storage."""
+
+    def _get_s3_storage_config(cfg):
+        primary_storage_name = cfg.lib_desc.storage_ids[0]
+        primary_any = cfg.storage_by_id[primary_storage_name]
         s3_config = S3Config()
         primary_any.config.Unpack(s3_config)
         return s3_config
 
-    wrong_uri = "s3://otherhost:test_bucket_0?access=dog&secret=cat&port=17988&region=blah"
-    altered_ac = Arctic(moto_s3_uri_incl_bucket)
-    altered_ac._library_adapter = S3LibraryAdapter(wrong_uri, EncodingVersion.V2)
-    # At this point the library_manager is still correct, so we can write
-    # and retrieve libraries, but the library_adapter has fake credentials
-    altered_ac.create_library("override_endpoint", LibraryOptions())
-    altered_lib = altered_ac["override_endpoint"]
-    s3_storage = _get_s3_storage_config(altered_lib)
-    assert s3_storage.endpoint == "otherhost:17988"
-    assert s3_storage.credential_name == "dog"
-    assert s3_storage.credential_key == "cat"
-    assert s3_storage.bucket_name == "test_bucket_0"
-    assert s3_storage.region == "blah"
+    endpoint, port, bucket, aws_access_key, aws_secret_key = moto_s3_endpoint_and_credentials
+    uri = (
+        endpoint.replace("http://", "s3://").rsplit(":", 1)[0]
+        + ":"
+        + bucket
+        + "?access="
+        + aws_access_key
+        + "&secret="
+        + aws_secret_key
+        + "&port="
+        + port
+    )
 
-    # Enable `force_uri_lib_config` and instantiate Arctic using the genuine moto details.
-    # These differ from the fake details that the library was created with.
-    override_uri = "{}&region=reg&force_uri_lib_config=True".format(moto_s3_uri_incl_bucket)
-    override_ac = Arctic(override_uri)
-    override_lib = override_ac["override_endpoint"]
-    s3_storage = _get_s3_storage_config(override_lib)
-    assert s3_storage.endpoint == override_ac._library_adapter._endpoint
-    assert s3_storage.credential_name == override_ac._library_adapter._query_params.access
-    assert s3_storage.credential_key == override_ac._library_adapter._query_params.secret
-    assert s3_storage.bucket_name == override_ac._library_adapter._bucket
-    assert s3_storage.region == override_ac._library_adapter._query_params.region
+    ac = Arctic(uri)
+    ac.create_library("test")
 
-    # Same as above, but with `force_uri_lib_config` off.
-    # This should return the fake details the library was created with.
-    ac = Arctic(moto_s3_uri_incl_bucket)
-    lib = ac["override_endpoint"]
-    s3_storage = _get_s3_storage_config(lib)
-    assert s3_storage.endpoint == "otherhost:17988"
-    assert s3_storage.credential_name == "dog"
-    assert s3_storage.credential_key == "cat"
-    assert s3_storage.bucket_name == "test_bucket_0"
-    assert s3_storage.region == "blah"
+    lib = ac["test"]
+    lib.write("sym", pd.DataFrame())
+
+    config = ac._library_manager.get_library_config("test")
+    s3_storage = _get_s3_storage_config(config)
+    assert s3_storage.bucket_name == ""
+    assert s3_storage.credential_name == ""
+    assert s3_storage.credential_key == ""
+    assert s3_storage.endpoint == ""
+    assert s3_storage.max_connections == 0
+    assert s3_storage.connect_timeout == 0
+    assert s3_storage.request_timeout == 0
+    assert not s3_storage.ssl
+    assert s3_storage.prefix.startswith("test")
+    assert not s3_storage.https
+    assert s3_storage.region == ""
+    assert not s3_storage.use_virtual_addressing
+
+    assert "sym" in ac["test"].list_symbols()
 
 
-def test_library_options(object_storage_uri_incl_bucket):
-    ac = Arctic(object_storage_uri_incl_bucket)
+def test_library_options(arctic_client):
+    ac = arctic_client
     assert ac.list_libraries() == []
     ac.create_library("pytest_default_options")
     lib = ac["pytest_default_options"]
+    assert lib.options() == LibraryOptions(encoding_version=ac._encoding_version)
     write_options = lib._nvs._lib_cfg.lib_desc.version.write_options
     assert not write_options.dynamic_schema
     assert not write_options.de_duplication
     assert write_options.segment_row_size == 100_000
     assert write_options.column_group_size == 127
+    assert lib._nvs._lib_cfg.lib_desc.version.encoding_version == ac._encoding_version
 
+    library_options = LibraryOptions(
+        dynamic_schema=True, dedup=True, rows_per_segment=20, columns_per_segment=3, encoding_version=EncodingVersion.V2
+    )
     ac.create_library(
         "pytest_explicit_options",
-        LibraryOptions(dynamic_schema=True, dedup=True, rows_per_segment=20, columns_per_segment=3),
+        library_options,
     )
     lib = ac["pytest_explicit_options"]
+    assert lib.options() == library_options
     write_options = lib._nvs._lib_cfg.lib_desc.version.write_options
     assert write_options.dynamic_schema
     assert write_options.de_duplication
     assert write_options.segment_row_size == 20
     assert write_options.column_group_size == 3
     assert write_options.dynamic_strings
+    assert lib._nvs._lib_cfg.lib_desc.version.encoding_version == EncodingVersion.V2
 
 
-def test_separation_between_libraries(object_storage_uri_incl_bucket):
+def test_separation_between_libraries(arctic_client):
     """Validate that symbols in one library are not exposed in another."""
-    ac = Arctic(object_storage_uri_incl_bucket)
+    ac = arctic_client
     assert ac.list_libraries() == []
 
     ac.create_library("pytest_test_lib")
     ac.create_library("pytest_test_lib_2")
 
-    assert ac.list_libraries() == ["pytest_test_lib", "pytest_test_lib_2"]
+    assert set(ac.list_libraries()) == {"pytest_test_lib", "pytest_test_lib_2"}
 
     ac["pytest_test_lib"].write("test_1", pd.DataFrame())
     ac["pytest_test_lib_2"].write("test_2", pd.DataFrame())
@@ -186,22 +198,35 @@ def get_path_prefix_option(uri):
 def test_separation_between_libraries_with_prefixes(object_storage_uri_incl_bucket):
     """The motivation for the prefix feature is that separate users want to be able to create libraries
     with the same name in the same bucket without over-writing each other's work. This can be useful when
-    creating a new bucket is time-consuming, for example due to organisational issues.
+    creating a new bucket is time-consuming, for example due to organizational issues.
     """
+    if "mongo" in object_storage_uri_incl_bucket:
+        pytest.skip("Mongo doesn't support path_prefix")
 
     option = get_path_prefix_option(object_storage_uri_incl_bucket)
-    mercury_uri = f"{object_storage_uri_incl_bucket}{option}=/planet/mercury"
+    if option not in object_storage_uri_incl_bucket:
+        mercury_uri = f"{object_storage_uri_incl_bucket}{option}=/planet_mercury"
+    else:
+        # if we have a path_prefix, we assume that it is at the end and we simply append to it
+        mercury_uri = f"{object_storage_uri_incl_bucket}/planet_mercury"
+
     ac_mercury = Arctic(mercury_uri)
-    assert ac_mercury.list_libraries() == []
 
-    mars_uri = f"{object_storage_uri_incl_bucket}{option}=/planet/mars"
+    if option not in object_storage_uri_incl_bucket:
+        mars_uri = f"{object_storage_uri_incl_bucket}{option}=/planet_mars"
+    else:
+        # if we have a path_prefix, we assume that it is at the end and we simply append to it
+        mars_uri = f"{object_storage_uri_incl_bucket}/planet_mars"
+
     ac_mars = Arctic(mars_uri)
-    assert ac_mars.list_libraries() == []
 
+    assert ac_mars.list_libraries() == []
     ac_mercury.create_library("pytest_test_lib")
+    ac_mercury.create_library("pytest_test_lib_2")
     ac_mars.create_library("pytest_test_lib")
-    assert ac_mercury.list_libraries() == ["pytest_test_lib"]
-    assert ac_mars.list_libraries() == ["pytest_test_lib"]
+    ac_mars.create_library("pytest_test_lib_2")
+    assert ac_mercury.list_libraries() == ["pytest_test_lib", "pytest_test_lib_2"]
+    assert ac_mars.list_libraries() == ["pytest_test_lib", "pytest_test_lib_2"]
 
     ac_mercury["pytest_test_lib"].write("test_1", pd.DataFrame())
     ac_mars["pytest_test_lib"].write("test_2", pd.DataFrame())
@@ -209,15 +234,20 @@ def test_separation_between_libraries_with_prefixes(object_storage_uri_incl_buck
     assert ac_mercury["pytest_test_lib"].list_symbols() == ["test_1"]
     assert ac_mars["pytest_test_lib"].list_symbols() == ["test_2"]
 
+    ac_mercury.delete_library("pytest_test_lib")
+    ac_mercury.delete_library("pytest_test_lib_2")
+
+    ac_mars.delete_library("pytest_test_lib")
+    ac_mars.delete_library("pytest_test_lib_2")
+
 
 def object_storage_uri_and_client():
+    if MACOS_CONDA_BUILD:
+        return [("moto_s3_uri_incl_bucket", "boto_client")]
+
     return [
         ("moto_s3_uri_incl_bucket", "boto_client"),
-        pytest.param(
-            "azurite_azure_uri_incl_bucket",
-            "azure_client_and_create_container",
-            marks=pytest.mark.skipif(not AZURE_SUPPORT, reason="Pending Azure Storge Conda support"),
-        ),
+        ("azurite_azure_uri_incl_bucket", "azure_client_and_create_container"),
     ]
 
 
@@ -307,6 +337,25 @@ def test_basic_write_read_update_and_append(arctic_library):
     lib.write("meta", df, metadata={"goodbye": "cruel world"})
     read_metadata = lib.read_metadata("meta")
     assert read_metadata.version == 1
+
+
+def test_write_metadata_with_none(arctic_library):
+    lib = arctic_library
+    symbol = "symbol"
+    meta = {"meta_" + str(symbol): 0}
+
+    result_write = lib.write_metadata(symbol, meta)
+    assert result_write.version == 0
+
+    read_meta_symbol = lib.read_metadata(symbol)
+    assert read_meta_symbol.data is None
+    assert read_meta_symbol.metadata == meta
+    assert read_meta_symbol.version == 0
+
+    read_symbol = lib.read(symbol)
+    assert read_symbol.data is None
+    assert read_symbol.metadata == meta
+    assert read_symbol.version == 0
 
 
 def staged_write(sym, arctic_library):
@@ -411,6 +460,40 @@ def test_delete_version(arctic_library):
     assert lib["symbol"].metadata == {"very": "interesting"}
 
 
+def test_list_versions_write_append_update(arctic_library):
+    lib = arctic_library
+    # Note: can only update timeseries dataframes
+    index = pd.date_range(start="2000-01-01", freq="D", periods=3)
+    df = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]}, index=index)
+    lib.write("symbol", df)
+    index_append = pd.date_range(start="2000-01-04", freq="D", periods=3)
+    df_append = pd.DataFrame({"col1": [7, 8, 9], "col2": [10, 11, 12]}, index=index_append)
+    lib.append("symbol", df_append)
+    index_update = pd.DatetimeIndex(["2000-01-03", "2000-01-05"])
+    df_update = pd.DataFrame({"col1": [13, 14], "col2": [15, 16]}, index=index_update)
+    lib.update("symbol", df_update)
+    assert_frame_equal(lib.read("symbol").data, pd.concat([df.iloc[:-1], df_update, df_append.iloc[[2]]]))
+    assert len(lib.list_versions("symbol")) == 3
+
+
+def test_list_versions_latest_only(arctic_library):
+    lib = arctic_library
+    df = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]})
+    lib.write("symbol", df)
+    lib.write("symbol", df)
+    lib.write("symbol", df)
+    assert len(lib.list_versions("symbol", latest_only=True)) == 1
+
+
+def test_non_existent_list_versions_latest_only(arctic_library):
+    lib = arctic_library
+    assert len(lib.list_versions("symbol", latest_only=True)) == 0
+    df = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]})
+    lib.write("symbol2", df)
+    lib.delete("symbol2")
+    assert len(lib.list_versions("symbol2", latest_only=True)) == 0
+
+
 def test_delete_version_with_snapshot(arctic_library):
     lib = arctic_library
     df = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]})
@@ -480,6 +563,16 @@ def test_delete_date_range(arctic_library):
         lib["symbol"].data, pd.DataFrame({"column": [7, 8]}, index=pd.date_range(start="1/3/2018", end="1/4/2018"))
     )
     assert lib["symbol"].version == 1
+
+
+@pytest.mark.skipif(not RUN_MONGO_TEST, reason="Mongo test on windows is fiddly")
+def test_mongo_repr(mongo_test_uri):
+    max_pool_size = 10
+    min_pool_size = 100
+    selection_timeout_ms = 1000
+    uri = f"{mongo_test_uri}/?maxPoolSize={max_pool_size}&minPoolSize={min_pool_size}&serverSelectionTimeoutMS={selection_timeout_ms}"
+    ac = Arctic(uri)
+    assert repr(ac) == f"Arctic(config=mongodb(endpoint={mongo_test_uri[len('mongodb://'):]}))"
 
 
 def test_s3_repr(moto_s3_uri_incl_bucket):
@@ -844,7 +937,7 @@ def test_numpy_string(arctic_library):
 
 @pytest.mark.skipif(sys.platform != "win32", reason="SKIP_WIN Numpy strings not supported yet")
 def test_numpy_string_fails_on_windows(arctic_library):
-    with pytest.raises(ArcticNativeNotYetImplemented):
+    with pytest.raises(ArcticDbNotYetImplemented):
         arctic_library.write("symbol", np.array(["ab", "cd", "efg"]))
 
 
@@ -904,8 +997,8 @@ def test_tail(arctic_library):
 
 
 @pytest.mark.parametrize("dedup", [True, False])
-def test_dedup(object_storage_uri_incl_bucket, dedup):
-    ac = Arctic(object_storage_uri_incl_bucket)
+def test_dedup(arctic_client, dedup):
+    ac = arctic_client
     assert ac.list_libraries() == []
     ac.create_library("pytest_test_library", LibraryOptions(dedup=dedup))
     lib = ac["pytest_test_library"]
@@ -916,8 +1009,8 @@ def test_dedup(object_storage_uri_incl_bucket, dedup):
     assert data_key_version == 0 if dedup else 1
 
 
-def test_segment_slicing(object_storage_uri_incl_bucket):
-    ac = Arctic(object_storage_uri_incl_bucket)
+def test_segment_slicing(arctic_client):
+    ac = arctic_client
     assert ac.list_libraries() == []
     rows_per_segment = 5
     columns_per_segment = 2
@@ -997,18 +1090,33 @@ def test_get_uri(object_storage_uri_incl_bucket):
     assert ac.get_uri() == object_storage_uri_incl_bucket
 
 
-def test_lmdb(tmpdir):
-    # Github Issue #520 - this used to segfault
-    d = {
-        "test1": pd.Timestamp("1979-01-18 00:00:00"),
-        "test2": pd.Timestamp("1979-01-19 00:00:00"),
-    }
+def test_azure_no_ca_path(azurite_azure_test_connection_setting):
+    endpoint, container, credential_name, credential_key, _ = azurite_azure_test_connection_setting
+    Arctic(
+        f"azure://DefaultEndpointsProtocol=http;AccountName={credential_name};AccountKey={credential_key};BlobEndpoint={endpoint}/{credential_name};Container={container}"
+    )
 
-    arc = Arctic(f"lmdb://{tmpdir}")
-    arc.create_library("model")
-    lib = arc.get_library("model")
 
-    for i in range(50):
-        lib.write_pickle("test", d)
-        lib = arc.get_library("model")
-        lib.read("test").data
+@pytest.mark.skipif(MACOS_CONDA_BUILD, reason=MACOS_CONDA_BUILD_SKIP_REASON)
+def test_azure_sas_token(azure_account_sas_token, azurite_azure_test_connection_setting):
+    endpoint, container, credential_name, _, _ = azurite_azure_test_connection_setting
+    ac = Arctic(
+        f"azure://DefaultEndpointsProtocol=http;SharedAccessSignature={azure_account_sas_token};BlobEndpoint={endpoint}/{credential_name};Container={container}"
+    )
+    expected = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]})
+    sym = "test"
+    lib = "lib"
+    ac.create_library(lib)
+    ac[lib].write(sym, expected)
+    assert_frame_equal(expected, ac[lib].read(sym).data)
+
+    assert ac.list_libraries() == [lib]
+
+
+def test_s3_force_uri_lib_config_handling(moto_s3_uri_incl_bucket):
+    # force_uri_lib_config is a obsolete configuration. However, user still includes this option in their setup. For backward compatitbility, we need to make sure such setup will still work
+    # Why it becomes obsolete: https://github.com/man-group/ArcticDB/pull/803
+    Arctic(f"{moto_s3_uri_incl_bucket}&force_uri_lib_config=true)")
+
+    with pytest.raises(ValueError):
+        Arctic(f"{moto_s3_uri_incl_bucket}&force_uri_lib_config=false)")

@@ -44,6 +44,9 @@ find_package(mongocxx REQUIRED)
 find_package(bsoncxx REQUIRED)
 find_package(zstd CONFIG REQUIRED)  # "CONFIG" bypasses our cpp/CMake/FindZstd.cmake module
 
+find_package(azure-identity-cpp CONFIG REQUIRED)
+find_package(azure-storage-blobs-cpp CONFIG REQUIRED)
+
 if(${BUILD_WITH_REMOTERY})
     add_compile_definitions(USE_REMOTERY)
 endif()
@@ -231,7 +234,7 @@ set(arcticdb_srcs
         processing/operation_dispatch_unary.hpp
         processing/operation_types.hpp
         processing/signed_unsigned_comparison.hpp
-        processing/processing_segment.hpp
+        processing/processing_unit.hpp
         processing/bucketizer.hpp
         processing/clause.hpp
         processing/expression_context.hpp
@@ -242,10 +245,12 @@ set(arcticdb_srcs
         storage/library.hpp
         storage/library_index.hpp
         storage/library_manager.hpp
+        storage/azure/azure_storage.hpp
+        storage/azure/azure_storage-inl.hpp
         storage/lmdb/lmdb_storage.hpp
         storage/lmdb/lmdb_storage-inl.hpp
         storage/memory/memory_storage.hpp
-        storage/memory/memory_storage-inl.hpp
+        storage/memory/memory_storage.cpp
         storage/mongo/mongo_client.hpp
         storage/mongo/mongo_instance.hpp
         storage/mongo/mongo_storage.hpp
@@ -261,7 +266,6 @@ set(arcticdb_srcs
         storage/storage.hpp
         storage/storage_override.hpp
         storage/store.hpp
-        storage/variant_storage.hpp
         stream/aggregator.hpp
         stream/aggregator-inl.hpp
         stream/append_map.hpp
@@ -344,6 +348,7 @@ set(arcticdb_srcs
         version/version_store_objects.hpp
         version/version_utils.hpp
         # CPP files
+        async/async_store.cpp
         async/task_scheduler.cpp
         async/tasks.cpp
         codec/codec.cpp
@@ -376,7 +381,7 @@ set(arcticdb_srcs
         pipeline/value_set.cpp
         pipeline/write_frame.cpp
         python/normalization_checks.cpp
-        processing/processing_segment.cpp
+        processing/processing_unit.cpp
         processing/aggregation.cpp
         processing/clause.cpp
         processing/expression_node.cpp
@@ -390,8 +395,9 @@ set(arcticdb_srcs
         python/python_to_tensor_frame.cpp
         storage/config_resolvers.cpp
         storage/failure_simulation.cpp
+        storage/library_manager.cpp
+        storage/azure/azure_storage.cpp
         storage/lmdb/lmdb_storage.cpp
-        storage/memory/memory_storage.cpp
         storage/mongo/mongo_client.cpp
         storage/mongo/mongo_instance.cpp
         storage/mongo/mongo_storage.cpp
@@ -425,12 +431,9 @@ set(arcticdb_srcs
         version/symbol_list.cpp)
 
 # Exclude vendored sources when using conda.
-if(NOT ${ARCTICDB_USING_CONDA}) #Awaiting Azure sdk support in conda https://github.com/man-group/ArcticDB/issues/519
+if(NOT ${ARCTICDB_USING_CONDA})
     list (APPEND arcticdb_srcs
         util/third_party/robin_hood.hpp
-        storage/azure/azure_storage-inl.hpp
-        storage/azure/azure_storage.hpp
-        storage/azure/azure_storage.cpp
     )
 endif()
 
@@ -488,16 +491,9 @@ set (arcticdb_core_libraries
         ${ARCTICDB_MONGO_LIBS}
         spdlog::spdlog
         Folly::folly # Transitively includes: double-conversion, gflags, glog, libevent, libssl, libcrypto, libiberty, libsodium
-        )
-
-if(NOT ${ARCTICDB_USING_CONDA})  #Awaiting Azure sdk support in conda https://github.com/man-group/ArcticDB/issues/519
-    find_package(azure-identity-cpp CONFIG REQUIRED)
-    find_package(azure-storage-blobs-cpp CONFIG REQUIRED)
-    list (APPEND arcticdb_core_libraries
         Azure::azure-identity
         Azure::azure-storage-blobs
-    )
-endif()
+)
 
 # Dependencies expose different names of their libraries depending
 # on their origin (i.e. vendored source or packages on conda-forge).
@@ -634,6 +630,8 @@ pybind11_add_module(arcticdb_ext MODULE
         python/arctic_version.hpp
         python/reader.hpp
         python/adapt_read_dataframe.hpp
+        python/python_handlers.hpp
+        python/python_handlers.cpp
         )
 
 set (additional_link_flags "")
@@ -711,6 +709,7 @@ if(${TEST})
             processing/test/test_clause.cpp
             processing/test/test_expression.cpp
             processing/test/test_has_valid_type_promotion.cpp
+            processing/test/test_operation_dispatch.cpp
             processing/test/test_set_membership.cpp
             processing/test/test_signed_unsigned_comparison.cpp
             processing/test/test_type_comparison.cpp
@@ -780,7 +779,6 @@ if(${TEST})
     else()
         set(COMMON_PUBLIC_TEST_LIBRARIES
                 arcticdb_core_static
-                atomic
                 GTest::gtest
                 GTest::gmock
                 Python::Python # + pybind11::pybind11 (transitively included) = pybind11::embed, but latter is sometimes not found...
@@ -789,6 +787,11 @@ if(${TEST})
                 k5crypto
                 util # TODO: find out where we lost the transitive link to it
                 )
+        if(NOT APPLE)
+            list(APPEND COMMON_PUBLIC_TEST_LIBRARIES
+                    atomic # Otherwise gtest_discover_tests cannot run the test if libatomic is not in a standard location
+                )
+        endif()
 
         find_library(Gcov_LIBRARY gcov)
         if (NOT(${Gcov_LIBRARY} EQUAL "Gcov_LIBRARY-NOTFOUND"))
@@ -830,7 +833,12 @@ if(${TEST})
                 PERMISSIONS ${EXECUTABLE_PERMS}
                 COMPONENT Tests)
 
-    set(RAPIDCHECK_PRIVATE_LIBRARIES ${AWSSDK_LINK_LIBRARIES} arrow_static)
+    if(ARCTICDB_USING_CONDA)
+        set(RAPIDCHECK_PRIVATE_LIBRARIES ${AWSSDK_LINK_LIBRARIES} Arrow::arrow_shared)
+    else()
+        set(RAPIDCHECK_PRIVATE_LIBRARIES ${AWSSDK_LINK_LIBRARIES} arrow_static)
+    endif()
+
     if(WIN32)
         target_link_libraries(arcticdb_rapidcheck_tests PUBLIC
                 arcticdb_core_static

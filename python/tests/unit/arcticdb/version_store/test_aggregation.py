@@ -26,12 +26,7 @@ from hypothesis.extra.pandas import column, data_frames, range_indexes
 def test_group_on_float_column_with_nans(lmdb_version_store):
     lib = lmdb_version_store
     sym = "test_group_on_float_column_with_nans"
-    df = pd.DataFrame(
-        {
-            "grouping_column": [1.0, 2.0, np.nan, 1.0, 2.0, 2.0],
-            "agg_column": [1, 2, 3, 4, 5, 6],
-        }
-    )
+    df = pd.DataFrame({"grouping_column": [1.0, 2.0, np.nan, 1.0, 2.0, 2.0], "agg_column": [1, 2, 3, 4, 5, 6]})
     lib.write(sym, df)
     expected = df.groupby("grouping_column").agg({"agg_column": "sum"})
     q = QueryBuilder()
@@ -130,7 +125,7 @@ def test_hypothesis_max_min_agg(lmdb_version_store, df):
     assert_frame_equal(expected, vit.data)
 
 
-def test_sum_aggregation(object_version_store):
+def test_sum_aggregation(local_object_version_store):
     df = DataFrame(
         {"grouping_column": ["group_1", "group_1", "group_1", "group_2", "group_2"], "to_sum": [1, 1, 2, 2, 2]},
         index=np.arange(5),
@@ -138,9 +133,9 @@ def test_sum_aggregation(object_version_store):
     q = QueryBuilder()
     q = q.groupby("grouping_column").agg({"to_sum": "sum"})
     symbol = "test_sum_aggregation"
-    object_version_store.write(symbol, df)
+    local_object_version_store.write(symbol, df)
 
-    res = object_version_store.read(symbol, query_builder=q)
+    res = local_object_version_store.read(symbol, query_builder=q)
     res.data.sort_index(inplace=True)
 
     df = pd.DataFrame({"to_sum": [4, 4]}, index=["group_1", "group_2"])
@@ -150,7 +145,7 @@ def test_sum_aggregation(object_version_store):
     assert_frame_equal(res.data, df)
 
 
-def test_mean_aggregation(object_version_store):
+def test_mean_aggregation(local_object_version_store):
     df = DataFrame(
         {"grouping_column": ["group_1", "group_1", "group_1", "group_2", "group_2"], "to_mean": [1, 1, 2, 2, 2]},
         index=np.arange(5),
@@ -158,9 +153,9 @@ def test_mean_aggregation(object_version_store):
     q = QueryBuilder()
     q = q.groupby("grouping_column").agg({"to_mean": "mean"})
     symbol = "test_aggregation"
-    object_version_store.write(symbol, df)
+    local_object_version_store.write(symbol, df)
 
-    res = object_version_store.read(symbol, query_builder=q)
+    res = local_object_version_store.read(symbol, query_builder=q)
     res.data.sort_index(inplace=True)
 
     df = pd.DataFrame({"to_mean": [4 / 3, 2]}, index=["group_1", "group_2"])
@@ -170,7 +165,7 @@ def test_mean_aggregation(object_version_store):
     assert_frame_equal(res.data, df)
 
 
-def test_mean_aggregation_float(object_version_store):
+def test_mean_aggregation_float(local_object_version_store):
     df = DataFrame(
         {
             "grouping_column": ["group_1", "group_1", "group_1", "group_2", "group_2"],
@@ -181,9 +176,9 @@ def test_mean_aggregation_float(object_version_store):
     q = QueryBuilder()
     q = q.groupby("grouping_column").agg({"to_mean": "mean"})
     symbol = "test_aggregation"
-    object_version_store.write(symbol, df)
+    local_object_version_store.write(symbol, df)
 
-    res = object_version_store.read(symbol, query_builder=q)
+    res = local_object_version_store.read(symbol, query_builder=q)
     res.data.sort_index(inplace=True)
 
     df = pd.DataFrame({"to_mean": [(1.1 + 1.4 + 2.5) / 3, 2.2]}, index=["group_1", "group_2"])

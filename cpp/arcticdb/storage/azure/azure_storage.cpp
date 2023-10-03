@@ -5,7 +5,10 @@
  * As of the Change Date specified in that file, in accordance with the Business Source License, use of this software will be governed by the Apache License, version 2.0.
  */
 
-#include <arcticdb/storage/azure/azure_storage.hpp>
+#define ARCTICDB_AZURE_STORAGE_H_
+#include <arcticdb/storage/azure/azure_storage-inl.hpp>
+
+
 #include <arcticdb/log/log.hpp>
 #include <azure/core/http/curl_transport.hpp>
 
@@ -16,7 +19,7 @@ using namespace Azure::Storage::Blobs;
 
 
 AzureStorage::AzureStorage(const LibraryPath &library_path, OpenMode mode, const Config &conf) :
-    Parent(library_path, mode),
+    Storage(library_path, mode),
     container_client_(BlobContainerClient::CreateFromConnectionString(conf.endpoint(), conf.container_name(), get_client_options(conf))),
     root_folder_(object_store_utils::get_root_folder(library_path)),
     request_timeout_(conf.request_timeout() == 0 ? 60000 : conf.request_timeout()){
@@ -38,10 +41,12 @@ AzureStorage::AzureStorage(const LibraryPath &library_path, OpenMode mode, const
 }
 
 Azure::Storage::Blobs::BlobClientOptions AzureStorage::get_client_options(const Config &conf) {
-    Azure::Core::Http::CurlTransportOptions curl_transport_options;
-    curl_transport_options.CAInfo = conf.ca_cert_path();
     BlobClientOptions client_options;
-    client_options.Transport.Transport = std::make_shared<Azure::Core::Http::CurlTransport>(curl_transport_options);
+    if (!conf.ca_cert_path().empty()) {//WARNING: Setting ca_cert_path will force Azure sdk uses libcurl as backend support, instead of winhttp
+        Azure::Core::Http::CurlTransportOptions curl_transport_options;
+        curl_transport_options.CAInfo = conf.ca_cert_path();
+        client_options.Transport.Transport = std::make_shared<Azure::Core::Http::CurlTransport>(curl_transport_options);
+    }
     return client_options;
 }
 
